@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine // <-- FIX 1: Import Combine for AnyCancellable
 import IOKit.ps
 import ServiceManagement
 
@@ -49,7 +50,12 @@ class AppController: ObservableObject {
             updateIndicatorVisibility()
         }
     }
-    @Published var launchAtLogin: Bool = false
+    @Published var launchAtLogin: Bool = false {
+        didSet {
+            // Update the system setting when this property changes.
+            LoginItemHelper.set(enabled: launchAtLogin)
+        }
+    }
     
     private var batteryService: BatteryService
     private var indicatorWindow: NSWindow?
@@ -94,11 +100,8 @@ class AppController: ObservableObject {
         window.isReleasedWhenClosed = false // Keep the window instance in memory.
 
         // Create the SwiftUI view for the bar itself
-        let indicatorView = BatteryBarView(
-            level: batteryService.level,
-            color: batteryService.color
-        )
-        .environmentObject(batteryService) // Pass the service to the view
+        let indicatorView = BatteryBarView()
+            .environmentObject(batteryService) // Pass the service to the view
 
         // Host the SwiftUI view within the NSWindow
         window.contentView = NSHostingView(rootView: indicatorView)
@@ -126,18 +129,12 @@ class AppController: ObservableObject {
         newFrame.size.width = newWidth
         
         // This smoothly animates the bar's width change.
-        window.animator().setFrame(newFrame, display: true)
-        
-        // Update the color by recreating the view.
-        if let hostingView = window.contentView as? NSHostingView<BatteryBarView> {
-            hostingView.rootView.color = color
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.5
+            window.animator().setFrame(newFrame, display: true)
         }
-    }
-
-    /// Toggles the "Launch at Login" setting.
-    func toggleLaunchAtLogin() {
-        self.launchAtLogin.toggle()
-        LoginItemHelper.set(enabled: self.launchAtLogin)
+        
+        // Update the color via the environment object. The view will react automatically.
     }
 
     /// Called when the app quits to stop the timer.
@@ -178,12 +175,16 @@ class BatteryService: ObservableObject {
         guard let source = sources.first else {
             // No power source found (e.g., on a desktop Mac like an iMac)
             // You could hide the indicator or show a specific state
-            self.level = 1.0 // Assume full power
-            self.color = .gray
+            DispatchQueue.main.async {
+                self.level = 1.0 // Assume full power
+                self.color = .gray
+            }
             return
         }
 
-        let description = IOPSGetPowerSourceDescription(snapshot, source).takeUnretainedValue() as! [String: AnyObject]
+        guard let description = IOPSGetPowerSourceDescription(snapshot, source)?.takeUnretainedValue() as? [String: AnyObject] else {
+            return
+        }
         
         let currentCapacity = description[kIOPSCurrentCapacityKey] as? Int ?? 0
         let maxCapacity = description[kIOPSMaxCapacityKey] as? Int ?? 0
@@ -228,12 +229,8 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Show Battery Bar", isOn: $appController.isIndicatorVisible)
             
+            // <-- FIX 2: Updated Toggle and onChange syntax
             Toggle("Launch at Login", isOn: $appController.launchAtLogin)
-                .onChange(of: appController.launchAtLogin) { _ in
-                    // This seems redundant, but ensures the model is the source of truth
-                    // in case the view's state gets out of sync.
-                    LoginItemHelper.set(enabled: appController.launchAtLogin)
-                }
 
             Divider()
 
@@ -248,43 +245,41 @@ struct MenuBarView: View {
 /// The actual colored bar view.
 struct BatteryBarView: View {
     @EnvironmentObject var batteryService: BatteryService
-    @State var level: Double
-    @State var color: Color
 
     var body: some View {
         Rectangle()
             .fill(batteryService.color)
-            .onReceive(batteryService.$level) { newLevel in
-                self.level = newLevel
-            }
-            .onReceive(batteryService.$color) { newColor in
-                self.color = newColor
-            }
-            // Note: The window's frame is what actually controls the visible width.
-            // This view just fills the space it's given.
+            // The view now gets its values directly from the environment object,
+            // so local @State properties are no longer needed.
     }
 }
 
 
 // MARK: - Launch at Login Helper
+// <-- FIX 3: Rewritten to use the modern SMAppService API
 struct LoginItemHelper {
-    private static let bundleID = Bundle.main.bundleIdentifier!
-
+    
     /// Checks if the app is currently enabled to launch at login.
     static var isEnabled: Bool {
-        guard let jobs = SMLoginItemSetCopyEnabled(bundleID as CFString, nil)?.takeRetainedValue() as? [[String: Any]] else {
-            return false
-        }
-        return jobs.first?["enabled"] as? Bool ?? false
+        // SMAppService.main.status is the modern way to check
+        return SMAppService.main.status == .enabled
     }
 
     /// Enables or disables the launch at login setting.
     static func set(enabled: Bool) {
-        if SMLoginItemSetEnabled(bundleID as CFString, enabled) {
+        do {
+            if enabled {
+                // Register the app to launch at login
+                if SMAppService.main.status == .notFound {
+                    try SMAppService.main.register()
+                }
+            } else {
+                // Unregister the app
+                try SMAppS_er_vice.main.unregister()
+            }
             print("Successfully set launch at login to \(enabled)")
-        } else {
-            print("Failed to set launch at login.")
+        } catch {
+            print("Failed to set launch at login: \(error.localizedDescription)")
         }
     }
 }
-
