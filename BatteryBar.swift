@@ -10,11 +10,15 @@ struct BatteryIndicatorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // The Settings scene provides the menu bar icon and its content.
-        // The main app window is handled by the AppDelegate.
-        Settings {
+        // <-- FIX: Changed Settings to MenuBarExtra and added a visible icon.
+        MenuBarExtra {
+            // This is the content of the menu that appears on click.
             MenuBarView()
                 .environmentObject(appDelegate.appController)
+        } label: {
+            // This is the visible icon in the menu bar.
+            // "battery.100" is a built-in system icon.
+            Image(systemName: "battery.100")
         }
     }
 }
@@ -140,7 +144,6 @@ class AppController: ObservableObject {
 class BatteryService: ObservableObject {
     @Published var level: Double = 1.0
     @Published var color: Color = .green
-    // <-- CHANGE: New property to track if a battery exists.
     @Published var hasBattery: Bool = true
     
     private var timer: Timer?
@@ -165,18 +168,15 @@ class BatteryService: ObservableObject {
         let snapshot = IOPSCopyPowerSourcesInfo().takeRetainedValue()
         let sources = IOPSCopyPowerSourcesList(snapshot).takeRetainedValue() as Array
         
-        // <-- CHANGE: Check if a power source (battery) exists.
         guard let source = sources.first else {
-            // No battery found (e.g., on a desktop Mac).
             DispatchQueue.main.async {
                 self.hasBattery = false
-                self.level = 1.0 // Set to full width for the rainbow bar.
-                self.stopMonitoring() // Stop timer, no need to check again.
+                self.level = 1.0
+                self.stopMonitoring()
             }
             return
         }
 
-        // If we get here, a battery was found.
         guard let description = IOPSGetPowerSourceDescription(snapshot, source)?.takeUnretainedValue() as? [String: AnyObject] else {
             return
         }
@@ -233,21 +233,17 @@ struct MenuBarView: View {
 }
 
 /// The actual colored bar view.
-// <-- CHANGE: This view is now more intelligent.
 struct BatteryBarView: View {
     @EnvironmentObject var batteryService: BatteryService
     @State private var hueRotation = 0.0
     
-    // Timer to drive the rainbow animation.
     private let animationTimer = Timer.publish(every: 0.02, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        // Conditionally show battery color or animated rainbow.
         if batteryService.hasBattery {
             Rectangle()
                 .fill(batteryService.color)
         } else {
-            // Animated rainbow for Macs without a battery.
             Rectangle()
                 .fill(
                     LinearGradient(
@@ -258,7 +254,6 @@ struct BatteryBarView: View {
                 )
                 .hueRotation(.degrees(hueRotation))
                 .onReceive(animationTimer) { _ in
-                    // Animate the hue rotation to create a shimmering effect.
                     hueRotation = (hueRotation + 1).truncatingRemainder(dividingBy: 360)
                 }
         }
