@@ -22,13 +22,9 @@ struct BatteryIndicatorApp: App {
 // MARK: - App Delegate
 class AppDelegate: NSObject, NSApplicationDelegate {
     // The main controller for our app's logic.
-    fileprivate var appController: AppController!
+    fileprivate var appController = AppController()
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
-        // When the app launches, initialize the main controller.
-        // This kicks off battery monitoring and sets up the indicator window.
-        appController = AppController()
-        
         // This is crucial for menu bar apps. It hides the app's icon from the Dock.
         // To make this work, you MUST also add a new key to the Info.plist file:
         // "Application is agent (UIElement)" and set its value to "YES".
@@ -44,7 +40,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - App Controller (Main Logic)
 class AppController: ObservableObject {
-    // Published properties will automatically update SwiftUI views when they change.
     @AppStorage("isIndicatorVisible") var isIndicatorVisible: Bool = true {
         didSet {
             updateIndicatorVisibility()
@@ -52,26 +47,27 @@ class AppController: ObservableObject {
     }
     @Published var launchAtLogin: Bool = false {
         didSet {
-            // Update the system setting when this property changes.
             LoginItemHelper.set(enabled: launchAtLogin)
         }
     }
     
-    private var batteryService: BatteryService
+    // We pass the battery service down to the views using the environment.
+    @ObservedObject var batteryService: BatteryService
     private var indicatorWindow: NSWindow?
     
     init() {
-        self.batteryService = BatteryService()
+        let service = BatteryService()
+        self.batteryService = service
         self.launchAtLogin = LoginItemHelper.isEnabled
         
         setupIndicatorWindow()
         updateIndicatorVisibility()
         
         // Observe changes from the battery service
-        batteryService.$level.combineLatest(batteryService.$color)
+        service.$level
             .receive(on: RunLoop.main)
-            .sink { [weak self] (level, color) in
-                self?.updateIndicator(level: level, color: color)
+            .sink { [weak self] level in
+                self?.updateIndicator(level: level)
             }
             .store(in: &cancellables)
     }
@@ -92,18 +88,17 @@ class AppController: ObservableObject {
         )
 
         // --- Window Configuration ---
-        window.level = .mainMenu + 1 // Places the window just above the desktop but below the menu bar icons.
+        window.level = .mainMenu + 1
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.ignoresMouseEvents = true // Allows clicks to pass through the window.
-        window.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle] // Makes it appear on all spaces.
-        window.isReleasedWhenClosed = false // Keep the window instance in memory.
+        window.ignoresMouseEvents = true
+        window.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
+        window.isReleasedWhenClosed = false
 
-        // Create the SwiftUI view for the bar itself
+        // Create the SwiftUI view for the bar itself, passing the service.
         let indicatorView = BatteryBarView()
-            .environmentObject(batteryService) // Pass the service to the view
+            .environmentObject(batteryService)
 
-        // Host the SwiftUI view within the NSWindow
         window.contentView = NSHostingView(rootView: indicatorView)
         self.indicatorWindow = window
     }
@@ -117,8 +112,8 @@ class AppController: ObservableObject {
         }
     }
     
-    /// Updates the indicator's width and color.
-    private func updateIndicator(level: Double, color: Color) {
+    /// Updates the indicator's width. Color is now handled by the view.
+    private func updateIndicator(level: Double) {
         guard let window = indicatorWindow,
               let screen = NSScreen.main else { return }
               
@@ -128,7 +123,6 @@ class AppController: ObservableObject {
         var newFrame = window.frame
         newFrame.size.width = newWidth
         
-        // This smoothly animates the bar's width change.
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.5
             window.animator().setFrame(newFrame, display: true)
@@ -146,6 +140,8 @@ class AppController: ObservableObject {
 class BatteryService: ObservableObject {
     @Published var level: Double = 1.0
     @Published var color: Color = .green
+    // <-- CHANGE: New property to track if a battery exists.
+    @Published var hasBattery: Bool = true
     
     private var timer: Timer?
 
@@ -154,7 +150,6 @@ class BatteryService: ObservableObject {
     }
 
     func startMonitoring() {
-        // Check battery immediately on start, then set a timer to check periodically.
         updateBatteryStatus()
         timer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
             self?.updateBatteryStatus()
@@ -170,14 +165,18 @@ class BatteryService: ObservableObject {
         let snapshot = IOPSCopyPowerSourcesInfo().takeRetainedValue()
         let sources = IOPSCopyPowerSourcesList(snapshot).takeRetainedValue() as Array
         
+        // <-- CHANGE: Check if a power source (battery) exists.
         guard let source = sources.first else {
+            // No battery found (e.g., on a desktop Mac).
             DispatchQueue.main.async {
-                self.level = 1.0 // Assume full power for desktops
-                self.color = .gray
+                self.hasBattery = false
+                self.level = 1.0 // Set to full width for the rainbow bar.
+                self.stopMonitoring() // Stop timer, no need to check again.
             }
             return
         }
 
+        // If we get here, a battery was found.
         guard let description = IOPSGetPowerSourceDescription(snapshot, source)?.takeUnretainedValue() as? [String: AnyObject] else {
             return
         }
@@ -188,6 +187,7 @@ class BatteryService: ObservableObject {
         let newLevel = (maxCapacity > 0) ? Double(currentCapacity) / Double(maxCapacity) : 0
         
         DispatchQueue.main.async {
+            self.hasBattery = true
             self.level = newLevel
             self.color = self.getColorForLevel(newLevel)
         }
@@ -222,11 +222,8 @@ struct MenuBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Show Battery Bar", isOn: $appController.isIndicatorVisible)
-            
             Toggle("Launch at Login", isOn: $appController.launchAtLogin)
-
             Divider()
-
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
@@ -236,37 +233,56 @@ struct MenuBarView: View {
 }
 
 /// The actual colored bar view.
+// <-- CHANGE: This view is now more intelligent.
 struct BatteryBarView: View {
     @EnvironmentObject var batteryService: BatteryService
+    @State private var hueRotation = 0.0
+    
+    // Timer to drive the rainbow animation.
+    private let animationTimer = Timer.publish(every: 0.02, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        Rectangle()
-            .fill(batteryService.color)
+        // Conditionally show battery color or animated rainbow.
+        if batteryService.hasBattery {
+            Rectangle()
+                .fill(batteryService.color)
+        } else {
+            // Animated rainbow for Macs without a battery.
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        gradient: Gradient(colors: rainbowColors),
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .hueRotation(.degrees(hueRotation))
+                .onReceive(animationTimer) { _ in
+                    // Animate the hue rotation to create a shimmering effect.
+                    hueRotation = (hueRotation + 1).truncatingRemainder(dividingBy: 360)
+                }
+        }
+    }
+    
+    private var rainbowColors: [Color] {
+        return [.red, .orange, .yellow, .green, .blue, .indigo, .purple, .red]
     }
 }
 
 
 // MARK: - Launch at Login Helper
-// <-- FIX: Corrected implementation using SMAppService()
 struct LoginItemHelper {
     
-    /// Checks if the app is currently enabled to launch at login.
     static var isEnabled: Bool {
-        // Create an instance for the main app bundle and check its status.
         return SMAppService().status == .enabled
     }
 
-    /// Enables or disables the launch at login setting.
     static func set(enabled: Bool) {
         do {
-            // Create an instance of the service for the main app.
             let service = SMAppService()
-            
             if enabled {
-                // Register the app to launch at login.
                 try service.register()
             } else {
-                // Unregister the app.
                 try service.unregister()
             }
             print("Successfully set launch at login to \(enabled)")
