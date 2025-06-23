@@ -1,5 +1,5 @@
 import SwiftUI
-import Combine // <-- FIX 1: Import Combine for AnyCancellable
+import Combine
 import IOKit.ps
 import ServiceManagement
 
@@ -133,8 +133,6 @@ class AppController: ObservableObject {
             context.duration = 0.5
             window.animator().setFrame(newFrame, display: true)
         }
-        
-        // Update the color via the environment object. The view will react automatically.
     }
 
     /// Called when the app quits to stop the timer.
@@ -173,10 +171,8 @@ class BatteryService: ObservableObject {
         let sources = IOPSCopyPowerSourcesList(snapshot).takeRetainedValue() as Array
         
         guard let source = sources.first else {
-            // No power source found (e.g., on a desktop Mac like an iMac)
-            // You could hide the indicator or show a specific state
             DispatchQueue.main.async {
-                self.level = 1.0 // Assume full power
+                self.level = 1.0 // Assume full power for desktops
                 self.color = .gray
             }
             return
@@ -189,10 +185,8 @@ class BatteryService: ObservableObject {
         let currentCapacity = description[kIOPSCurrentCapacityKey] as? Int ?? 0
         let maxCapacity = description[kIOPSMaxCapacityKey] as? Int ?? 0
         
-        // Calculate the battery level percentage
         let newLevel = (maxCapacity > 0) ? Double(currentCapacity) / Double(maxCapacity) : 0
         
-        // Update published properties on the main thread
         DispatchQueue.main.async {
             self.level = newLevel
             self.color = self.getColorForLevel(newLevel)
@@ -229,7 +223,6 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Show Battery Bar", isOn: $appController.isIndicatorVisible)
             
-            // <-- FIX 2: Updated Toggle and onChange syntax
             Toggle("Launch at Login", isOn: $appController.launchAtLogin)
 
             Divider()
@@ -249,33 +242,32 @@ struct BatteryBarView: View {
     var body: some View {
         Rectangle()
             .fill(batteryService.color)
-            // The view now gets its values directly from the environment object,
-            // so local @State properties are no longer needed.
     }
 }
 
 
 // MARK: - Launch at Login Helper
-// <-- FIX 3: Rewritten to use the modern SMAppService API
+// <-- FIX: Corrected implementation using SMAppService()
 struct LoginItemHelper {
     
     /// Checks if the app is currently enabled to launch at login.
     static var isEnabled: Bool {
-        // SMAppService.main.status is the modern way to check
-        return SMAppService.main.status == .enabled
+        // Create an instance for the main app bundle and check its status.
+        return SMAppService().status == .enabled
     }
 
     /// Enables or disables the launch at login setting.
     static func set(enabled: Bool) {
         do {
+            // Create an instance of the service for the main app.
+            let service = SMAppService()
+            
             if enabled {
-                // Register the app to launch at login
-                if SMAppService.main.status == .notFound {
-                    try SMAppService.main.register()
-                }
+                // Register the app to launch at login.
+                try service.register()
             } else {
-                // Unregister the app
-                try SMAppS_er_vice.main.unregister()
+                // Unregister the app.
+                try service.unregister()
             }
             print("Successfully set launch at login to \(enabled)")
         } catch {
